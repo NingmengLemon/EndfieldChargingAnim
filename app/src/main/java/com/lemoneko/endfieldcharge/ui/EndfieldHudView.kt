@@ -2,6 +2,7 @@ package com.lemoneko.endfieldcharge.ui
 
 import android.content.Context
 import android.content.res.AssetManager
+import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -44,7 +45,8 @@ class EndfieldHudView(
     assets: AssetManager = context.assets,
 ) : View(context) {
 
-    private val density = resources.displayMetrics.density
+    /** Read through to the resources: density can change with the configuration. */
+    private val density: Float get() = resources.displayMetrics.density
 
     /**
      * Fraction of the screen width the pill may occupy.
@@ -123,6 +125,14 @@ class EndfieldHudView(
             (PILL_WIDTH * unit).toInt(),
             (PILL_MAX_HEIGHT * unit).toInt(),
         )
+    }
+
+    /** Rotation or a resolution change moves every design unit, so the scale is recomputed. */
+    override fun onConfigurationChanged(newConfig: Configuration?) {
+        super.onConfigurationChanged(newConfig)
+        recomputeScale()
+        requestLayout()
+        invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {

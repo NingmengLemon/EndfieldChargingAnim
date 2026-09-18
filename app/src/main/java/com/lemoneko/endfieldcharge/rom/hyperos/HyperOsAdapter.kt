@@ -2,6 +2,7 @@ package com.lemoneko.endfieldcharge.rom.hyperos
 
 import android.os.Bundle
 import android.util.Log
+import com.lemoneko.endfieldcharge.core.settings.ContentSettings
 import com.lemoneko.endfieldcharge.rom.RomAdapter
 import com.lemoneko.endfieldcharge.rom.hasClass
 import io.github.libxposed.api.XposedInterface
@@ -49,6 +50,9 @@ object HyperOsAdapter : RomAdapter {
      * charging view is attached to the notification shade root view. Making it a no-op keeps that
      * view out of the window tree while leaving the rest of `MiuiChargeController` intact.
      *
+     * Suppression is decided per call rather than at install time, so turning the module off in the
+     * settings screen hands the animation straight back to the ROM without restarting SystemUI.
+     *
      * Do not flip `ChargeUtils.sChargeAnimationDisabled` instead: it is read in five other places
      * and changes layout semantics rather than just visibility.
      */
@@ -57,9 +61,13 @@ object HyperOsAdapter : RomAdapter {
             .getDeclaredMethod(METHOD_ADD_CHARGE_VIEW)
         xposed.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { _: Chain ->
-                Log.i(TAG, "suppressed $CLS_CHARGE_ANIM_VIEW.$METHOD_ADD_CHARGE_VIEW()")
-                null
+            .intercept { chain: Chain ->
+                if (suppressionActive()) {
+                    Log.i(TAG, "suppressed $CLS_CHARGE_ANIM_VIEW.$METHOD_ADD_CHARGE_VIEW()")
+                    null
+                } else {
+                    chain.proceed()
+                }
             }
     }
 
@@ -83,8 +91,7 @@ object HyperOsAdapter : RomAdapter {
             .intercept { chain: Chain ->
                 val bundle = chain.args.firstOrNull() as? Bundle
                 val category = bundle?.getString(KEY_STRONG_TOAST_CATEGORY)
-                Log.i(TAG, "showCustomStrongToast(category=$category)")
-                if (category == CATEGORY_CHARGE) {
+                if (category == CATEGORY_CHARGE && suppressionActive()) {
                     Log.i(TAG, "suppressed charge strong toast")
                     null
                 } else {
@@ -92,4 +99,12 @@ object HyperOsAdapter : RomAdapter {
                 }
             }
     }
+
+    /**
+     * True while the module is meant to replace the ROM's animation.
+     *
+     * Defaults to true: before the settings provider answers, and if it is ever unreachable, the
+     * module should behave as if it is on rather than silently doing nothing.
+     */
+    private fun suppressionActive(): Boolean = ContentSettings.current().enabled
 }

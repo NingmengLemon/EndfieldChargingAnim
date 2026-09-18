@@ -3,7 +3,9 @@ package com.lemoneko.endfieldcharge.core
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.content.ComponentCallbacks
 import android.content.Context
+import android.content.res.Configuration
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -59,9 +61,24 @@ class EndfieldHudController(
     private var watcher: BatteryWatcher? = null
     private var animator: ValueAnimator? = null
 
+    /** Rotation and resolution changes move the cutout, so an attached window is re-placed. */
+    private val configurationCallback = object : ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            main.post {
+                if (window.isAttached) {
+                    window.updateTopMargin(HudMetrics.topMarginPx(context, settings.topGapDp))
+                    HudLog.i(SCOPE, "re-placed HUD window after a configuration change")
+                }
+            }
+        }
+
+        override fun onLowMemory() = Unit
+    }
+
     fun start() {
         if (watcher != null) return
         ContentSettings.observe(::applySettings)
+        context.registerComponentCallbacks(configurationCallback)
         watcher = BatteryWatcher(context, ::onBatteryChanged).also { it.start() }
         HudLog.i(SCOPE, "controller started (duration=${timeline.durationMillis}ms)")
     }
@@ -69,11 +86,12 @@ class EndfieldHudController(
     fun stop() {
         watcher?.stop()
         watcher = null
+        runCatching { context.unregisterComponentCallbacks(configurationCallback) }
         cancelAnimation()
         window.detach()
     }
 
-    /** Remote preference callbacks may arrive on a binder thread, so hop to the main thread. */
+    /** Settings callbacks may arrive on a binder thread, so hop to the main thread. */
     private fun applySettings(value: HudSettings) {
         main.post {
             settings = value
@@ -81,6 +99,9 @@ class EndfieldHudController(
             view.widthRatio = value.widthRatio
             view.language = value.language
             if (!value.enabled && window.isAttached) hide()
+            if (window.isAttached) {
+                window.updateTopMargin(HudMetrics.topMarginPx(context, value.topGapDp))
+            }
             HudLog.i(SCOPE, "settings applied: $value")
         }
     }

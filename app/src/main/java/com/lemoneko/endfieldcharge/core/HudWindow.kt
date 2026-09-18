@@ -46,6 +46,16 @@ class HudWindow(private val context: Context) {
             .onFailure { HudLog.e(SCOPE, "failed to detach HUD window", it) }
     }
 
+    /**
+     * Re-places an attached window. Rotation and resolution changes move the display cutout, so the
+     * offset computed at attach time goes stale.
+     */
+    fun updateTopMargin(topMarginPx: Int) {
+        val view = attached ?: return
+        runCatching { windowManager.updateViewLayout(view, buildParams(topMarginPx)) }
+            .onFailure { HudLog.e(SCOPE, "failed to move HUD window", it) }
+    }
+
     private fun buildParams(topMarginPx: Int): WindowManager.LayoutParams =
         WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,

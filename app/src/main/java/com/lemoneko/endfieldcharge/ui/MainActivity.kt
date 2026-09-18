@@ -7,14 +7,19 @@ import android.app.Activity
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.animation.LinearInterpolator
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import com.lemoneko.endfieldcharge.BuildConfig
 import com.lemoneko.endfieldcharge.core.HudMetrics
@@ -22,6 +27,7 @@ import com.lemoneko.endfieldcharge.core.HudPlayMode
 import com.lemoneko.endfieldcharge.core.settings.HudSettings
 import com.lemoneko.endfieldcharge.core.timeline.HudTimeline
 import com.lemoneko.endfieldcharge.debug.FrameSheetRenderer
+import com.lemoneko.endfieldcharge.debug.SysfsProbe
 import com.lemoneko.endfieldcharge.settings.SettingsRepository
 import java.io.File
 
@@ -201,26 +207,27 @@ class MainActivity : Activity() {
 
         column.addView(
             LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(toggle("Enabled", { it.enabled }) { s, v -> s.copy(enabled = v) })
-                addView(toggle("Wake", { it.wakeOnPlug }) { s, v -> s.copy(wakeOnPlug = v) })
-                addView(toggle("Unplug", { it.playOnUnplug }) { s, v -> s.copy(playOnUnplug = v) })
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    toggle("Replace the ROM animation", { it.enabled }) { s, v ->
+                        s.copy(enabled = v)
+                    },
+                )
+                addView(
+                    toggle("Wake the screen on plug", { it.wakeOnPlug }) { s, v ->
+                        s.copy(wakeOnPlug = v)
+                    },
+                )
+                addView(
+                    toggle("Play on unplug", { it.playOnUnplug }) { s, v ->
+                        s.copy(playOnUnplug = v)
+                    },
+                )
             },
         )
 
         column.addView(label("language"))
-        column.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                for ((value, caption) in listOf(
-                    HudSettings.LANGUAGE_AUTO to "Auto",
-                    HudSettings.LANGUAGE_ZH to "中文",
-                    HudSettings.LANGUAGE_EN to "English",
-                )) {
-                    addView(button(caption) { SettingsRepository.update(settings.copy(language = value)) })
-                }
-            },
-        )
+        column.addView(languageSpinner())
 
         column.addView(
             LinearLayout(this).apply {
@@ -230,6 +237,7 @@ class MainActivity : Activity() {
             },
         )
         column.addView(button("Render frame sheets") { renderSheets() })
+        column.addView(button("Read battery sysfs") { status.text = SysfsProbe.report() })
 
         connection = TextView(this).apply {
             setTextColor(Color.LTGRAY)
@@ -249,11 +257,12 @@ class MainActivity : Activity() {
     // ---------------- settings plumbing ----------------
 
     /**
-     * A slider that reads its initial value from the settings and writes every change back.
-     *
-     * [binding] suppresses writes while [refresh] pushes values in, otherwise observing the store
-     * and editing it would feed each other.
+     * Controls register a binder that pushes the stored value back into the widget. [refresh] runs
+     * them with [binding] set, because otherwise observing the store and editing it would feed
+     * each other.
      */
+    private val binders = mutableListOf<(HudSettings) -> Unit>()
+
     private fun slider(
         max: Int,
         read: (HudSettings) -> Int,
@@ -267,12 +276,17 @@ class MainActivity : Activity() {
         }
         val bar = SeekBar(this).apply {
             this.max = max
-            progress = read(settings).coerceIn(0, max)
-            caption.text = format(progress)
             setOnSeekBarChangeListener(listener { value ->
                 caption.text = format(value)
-                if (!binding) SettingsRepository.update(write(settings, value))
+                if (!binding && value != read(settings)) {
+                    SettingsRepository.update(write(settings, value))
+                }
             })
+        }
+        binders += { current ->
+            val value = read(current).coerceIn(0, max)
+            bar.progress = value
+            caption.text = format(value)
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -285,15 +299,67 @@ class MainActivity : Activity() {
         label: String,
         read: (HudSettings) -> Boolean,
         write: (HudSettings, Boolean) -> HudSettings,
-    ) = Button(this).apply {
-        text = label
-        setOnClickListener { SettingsRepository.update(write(settings, !read(settings))) }
+    ): Switch {
+        val widget = Switch(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            setPadding((16 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), 0)
+            setOnCheckedChangeListener { _, checked ->
+                // A widget callback is not proof of a user action: setChecked and the first layout
+                // both fire it. Only a value that actually differs is a real edit.
+                if (!binding && checked != read(settings)) {
+                    SettingsRepository.update(write(settings, checked))
+                }
+            }
+        }
+        binders += { current -> widget.isChecked = read(current) }
+        return widget
     }
 
-    /** Pushes the current settings into the preview and the status lines. */
+    /** Language is the one setting with more than two states, so it gets a dropdown. */
+    private fun languageSpinner(): Spinner {
+        val values = listOf(
+            HudSettings.LANGUAGE_AUTO,
+            HudSettings.LANGUAGE_ZH,
+            HudSettings.LANGUAGE_EN,
+        )
+        val labels = listOf("Auto (system)", "中文", "English")
+
+        val widget = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, labels)
+                .apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: View?,
+                    position: Int,
+                    id: Long,
+                ) {
+                    // Spinner fires this once during its first layout, which is not a user edit.
+                    if (!binding && values[position] != settings.language) {
+                        SettingsRepository.update(settings.copy(language = values[position]))
+                    }
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins((16 * density).toInt(), 0, (16 * density).toInt(), 0) }
+        }
+        binders += { current ->
+            val index = values.indexOf(current.language).coerceAtLeast(0)
+            if (widget.selectedItemPosition != index) widget.setSelection(index)
+        }
+        return widget
+    }
+
+    /** Pushes the current settings into every control, the preview and the status lines. */
     private fun refresh() {
         binding = true
         try {
+            binders.forEach { it(settings) }
             preview.widthRatio = settings.widthRatio
             preview.language = settings.language
             applyOffset()
