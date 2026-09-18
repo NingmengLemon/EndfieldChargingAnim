@@ -99,11 +99,8 @@ class EndfieldHudController(
     private fun play(mode: HudPlayMode, snapshot: BatterySnapshot) {
         if (mode == HudPlayMode.CHARGE) wakeScreenIfNeeded()
 
-        val density = context.resources.displayMetrics.density
-        val topMarginPx = (TOP_MARGIN_DP * density).toInt()
-
         view.setSnapshot(snapshot)
-        if (!window.attach(view, topMarginPx)) {
+        if (!window.attach(view, HudMetrics.topMarginPx(context))) {
             HudLog.w(SCOPE, "window attach failed; skipping playback")
             return
         }
@@ -170,6 +167,5 @@ class EndfieldHudController(
     private companion object {
         const val SCOPE = "hud"
         const val WAKE_REASON = "com.ningmenglemon.endfieldcharge:PLUGGED"
-        const val TOP_MARGIN_DP = 8f
     }
 }
