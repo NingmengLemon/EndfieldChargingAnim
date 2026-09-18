@@ -1,7 +1,7 @@
 package com.lemoneko.endfieldcharge.rom.hyperos
 
 import android.os.Bundle
-import android.util.Log
+import com.lemoneko.endfieldcharge.core.HudLog
 import com.lemoneko.endfieldcharge.core.settings.ContentSettings
 import com.lemoneko.endfieldcharge.rom.RomAdapter
 import com.lemoneko.endfieldcharge.rom.hasClass
@@ -17,7 +17,7 @@ import io.github.libxposed.api.XposedInterface.Chain
  */
 object HyperOsAdapter : RomAdapter {
 
-    private const val TAG = "EndfieldCharge/HyperOS"
+    private const val SCOPE = "hyperos"
 
     const val CLS_CHARGE_ANIM_VIEW = "com.miui.charge.container.MiuiChargeAnimationView"
     const val CLS_CHARGE_CONTROLLER = "com.miui.charge.MiuiChargeController"
@@ -40,7 +40,7 @@ object HyperOsAdapter : RomAdapter {
     override fun install(xposed: XposedInterface, classLoader: ClassLoader) {
         suppressLockscreenChargeAnimation(xposed, classLoader)
         suppressChargeStrongToast(xposed, classLoader)
-        Log.i(TAG, "suppression hooks installed")
+        HudLog.i(SCOPE, "suppression hooks installed")
     }
 
     /**
@@ -63,7 +63,7 @@ object HyperOsAdapter : RomAdapter {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain: Chain ->
                 if (suppressionActive()) {
-                    Log.i(TAG, "suppressed $CLS_CHARGE_ANIM_VIEW.$METHOD_ADD_CHARGE_VIEW()")
+                    HudLog.i(SCOPE, "suppressed $CLS_CHARGE_ANIM_VIEW.$METHOD_ADD_CHARGE_VIEW()")
                     null
                 } else {
                     chain.proceed()
@@ -82,7 +82,7 @@ object HyperOsAdapter : RomAdapter {
     private fun suppressChargeStrongToast(xposed: XposedInterface, classLoader: ClassLoader) {
         val clazz = runCatching { classLoader.loadClass(CLS_STRONG_TOAST_CONTROL) }.getOrNull()
         if (clazz == null) {
-            Log.w(TAG, "$CLS_STRONG_TOAST_CONTROL not present; unlocked charge toast not suppressed")
+            HudLog.w(SCOPE, "$CLS_STRONG_TOAST_CONTROL not present; unlocked charge toast not suppressed")
             return
         }
         val method = clazz.getDeclaredMethod(METHOD_SHOW_CUSTOM_STRONG_TOAST, Bundle::class.java)
@@ -92,7 +92,7 @@ object HyperOsAdapter : RomAdapter {
                 val bundle = chain.args.firstOrNull() as? Bundle
                 val category = bundle?.getString(KEY_STRONG_TOAST_CATEGORY)
                 if (category == CATEGORY_CHARGE && suppressionActive()) {
-                    Log.i(TAG, "suppressed charge strong toast")
+                    HudLog.i(SCOPE, "suppressed charge strong toast")
                     null
                 } else {
                     chain.proceed()

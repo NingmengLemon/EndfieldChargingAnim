@@ -2,6 +2,7 @@ package com.lemoneko.endfieldcharge
 
 import android.util.Log
 import com.lemoneko.endfieldcharge.core.EndfieldHudController
+import com.lemoneko.endfieldcharge.core.HudLog
 import com.lemoneko.endfieldcharge.core.SystemUiContext
 import com.lemoneko.endfieldcharge.core.settings.ContentSettings
 import com.lemoneko.endfieldcharge.rom.RomAdapters
@@ -26,6 +27,9 @@ class ModuleEntry : XposedModule() {
     }
 
     override fun onPackageReady(param: PackageReadyParam) {
+        // Route the shared logger into the Xposed log too: logcat does not carry this process's
+        // android.util.Log output on every ROM.
+        HudLog.attach { priority, tag, message -> log(priority, tag, message) }
         log(
             Log.INFO,
             TAG,
