@@ -17,16 +17,13 @@ import android.view.WindowManager
  */
 object HudMetrics {
 
-    /** Gap between the display cutout and the top of the HUD window, in dp. */
-    const val TOP_GAP_DP = 8
-
     /** Distance from the top of the screen to the top of the HUD window, in pixels. */
-    fun topMarginPx(context: Context): Int =
-        topInsetPx(context) + (TOP_GAP_DP * context.resources.displayMetrics.density).toInt()
+    fun topMarginPx(context: Context, gapDp: Int): Int =
+        topInsetPx(context) + (gapDp * context.resources.displayMetrics.density).toInt()
 
     /** Same value in dp, for UI that talks in dp. */
-    fun topMarginDp(context: Context): Int =
-        (topInsetPx(context) / context.resources.displayMetrics.density).toInt() + TOP_GAP_DP
+    fun topMarginDp(context: Context, gapDp: Int): Int =
+        (topInsetPx(context) / context.resources.displayMetrics.density).toInt() + gapDp
 
     /** Falls back to the framework's status bar height when the cutout cannot be read. */
     fun topInsetPx(context: Context): Int {

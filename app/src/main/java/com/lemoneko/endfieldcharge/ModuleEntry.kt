@@ -3,6 +3,7 @@ package com.lemoneko.endfieldcharge
 import android.util.Log
 import com.lemoneko.endfieldcharge.core.EndfieldHudController
 import com.lemoneko.endfieldcharge.core.SystemUiContext
+import com.lemoneko.endfieldcharge.core.settings.ContentSettings
 import com.lemoneko.endfieldcharge.rom.RomAdapters
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
@@ -53,8 +54,12 @@ class ModuleEntry : XposedModule() {
         }.onSuccess {
             log(Log.INFO, TAG, "adapter installed: ${adapter.name}")
             SystemUiContext.onAvailable { context ->
-                runCatching { EndfieldHudController(context, MODULE_PACKAGE).start() }
-                    .onFailure { log(Log.ERROR, TAG, "failed to start HUD controller", it) }
+                runCatching {
+                    // Settings come from the module app's provider. Install before the controller
+                    // so it observes the stored values rather than the defaults.
+                    ContentSettings.install(context, MODULE_PACKAGE)
+                    EndfieldHudController(context, MODULE_PACKAGE).start()
+                }.onFailure { log(Log.ERROR, TAG, "failed to start HUD controller", it) }
             }
         }.onFailure {
             log(Log.ERROR, TAG, "adapter install failed", it)

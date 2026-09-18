@@ -53,4 +53,6 @@ dependencies {
     compileOnly(libs.androidx.annotation)
 
     testImplementation(libs.junit)
+    // android.jar only ships throwing stubs for org.json, so the JVM tests need the real one.
+    testImplementation(libs.json)
 }

@@ -1,5 +1,6 @@
 package com.lemoneko.endfieldcharge.ui
 
+import com.lemoneko.endfieldcharge.core.settings.HudSettings
 import java.util.Locale
 
 /**
@@ -10,12 +11,15 @@ import java.util.Locale
  */
 internal object HudStrings {
 
-    private val chinese: Boolean
-        get() = Locale.getDefault().language == "zh"
+    fun tagline(language: String): String =
+        if (isChinese(language)) "/// 超充模式" else "/// SUPER CHARGE MODE"
 
-    val tagline: String
-        get() = if (chinese) "/// 超充模式" else "/// SUPER CHARGE MODE"
+    fun title(language: String): String =
+        if (isChinese(language)) "超充模式" else "Super Charge Mode"
 
-    val title: String
-        get() = if (chinese) "超充模式" else "Super Charge Mode"
+    private fun isChinese(language: String): Boolean = when (language) {
+        HudSettings.LANGUAGE_ZH -> true
+        HudSettings.LANGUAGE_EN -> false
+        else -> Locale.getDefault().language == "zh"
+    }
 }

@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.view.View
 import com.lemoneko.endfieldcharge.core.BatterySnapshot
+import com.lemoneko.endfieldcharge.core.settings.HudSettings
 import com.lemoneko.endfieldcharge.core.timeline.HudState
 import com.lemoneko.endfieldcharge.core.timeline.RippleState
 import kotlin.math.max
@@ -46,18 +47,39 @@ class EndfieldHudView(
     private val density = resources.displayMetrics.density
 
     /**
-     * Design unit to pixel factor.
+     * Fraction of the screen width the pill may occupy.
      *
      * `zmd-charge` uses 560x90 logical pixels with a 0.8 global scale, which is 448 dp wide and
-     * does not fit a 411 dp phone. The scale is therefore capped by the screen width so the pill
-     * occupies at most [WIDTH_RATIO] of it; every length, radius and font size scales together.
+     * does not fit a 411 dp phone, so the scale is capped by the screen width instead; every
+     * length, radius, font size and stroke width scales together. Settable so the settings screen
+     * can change it live.
      */
-    private val uiScale: Float = run {
-        val widthDp = resources.displayMetrics.widthPixels / density
-        min(GLOBAL_SCALE, widthDp * WIDTH_RATIO / PILL_WIDTH)
-    }
+    var widthRatio: Float = HudSettings.DEFAULT_WIDTH_RATIO
+        set(value) {
+            val clamped = value.coerceIn(HudSettings.MIN_WIDTH_RATIO, HudSettings.MAX_WIDTH_RATIO)
+            if (field == clamped) return
+            field = clamped
+            recomputeScale()
+            requestLayout()
+            invalidate()
+        }
 
-    private val unit = uiScale * density
+    /** [HudSettings.LANGUAGE_AUTO], [HudSettings.LANGUAGE_ZH] or [HudSettings.LANGUAGE_EN]. */
+    var language: String = HudSettings.LANGUAGE_AUTO
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
+    /** Design unit to pixel factor. */
+    private var unit: Float = 0f
+
+    private fun recomputeScale() {
+        val widthDp = resources.displayMetrics.widthPixels / density
+        val scale = min(GLOBAL_SCALE, widthDp * widthRatio / PILL_WIDTH)
+        unit = scale * density
+    }
 
     private var state: HudState? = null
     private var snapshot: BatterySnapshot? = null
@@ -74,6 +96,10 @@ class EndfieldHudView(
 
     private val medium = HudTypefaces.medium(assets)
     private val bold = HudTypefaces.bold(assets)
+
+    init {
+        recomputeScale()
+    }
 
     // ---------------- reusable geometry ----------------
 
@@ -277,14 +303,14 @@ class EndfieldHudView(
         textPaint.typeface = medium
         textPaint.color = TEXT_PRIMARY
         textPaint.alpha = alpha(st.titleAlpha * TEXT_TERTIARY_ALPHA)
-        canvas.drawText(HudStrings.tagline, cx, top - taglineMetrics.ascent, textPaint)
+        canvas.drawText(HudStrings.tagline(language), cx, top - taglineMetrics.ascent, textPaint)
         top += taglineMetrics.height + TITLE_SPACING * unit
 
         textPaint.textSize = titleSize
         textPaint.typeface = bold
         textPaint.letterSpacing = TITLE_LETTER_SPACING / TITLE_SIZE
         textPaint.alpha = alpha(st.titleAlpha)
-        canvas.drawText(HudStrings.title, cx, top - titleMetrics.ascent, textPaint)
+        canvas.drawText(HudStrings.title(language), cx, top - titleMetrics.ascent, textPaint)
 
         textPaint.letterSpacing = 0f
     }
@@ -452,8 +478,6 @@ class EndfieldHudView(
         const val PILL_WIDTH = 560f
         const val PILL_MAX_HEIGHT = 90f
 
-        /** Fraction of the screen width the pill may occupy. */
-        const val WIDTH_RATIO = 0.92f
         const val GLOBAL_SCALE = 0.8f
 
         const val BOLT_CIRCLE = 32f

@@ -9,7 +9,8 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.animation.LinearInterpolator
-import com.lemoneko.endfieldcharge.core.timeline.AnimationOptions
+import com.lemoneko.endfieldcharge.core.settings.HudSettings
+import com.lemoneko.endfieldcharge.core.settings.ContentSettings
 import com.lemoneko.endfieldcharge.core.timeline.HudTimeline
 import com.lemoneko.endfieldcharge.ui.EndfieldHudView
 
@@ -26,13 +27,12 @@ enum class HudPlayMode {
  * ROM agnostic HUD driver: watches the battery, decides when to play, owns the window and runs
  * the frame loop.
  *
- * Everything ROM specific lives behind [com.lemoneko.endfieldcharge.rom.RomAdapter]; this
- * class only knows about batteries and pixels.
+ * Everything ROM specific lives behind [com.lemoneko.endfieldcharge.rom.RomAdapter]; this class
+ * only knows about batteries and pixels.
  */
 class EndfieldHudController(
     private val context: Context,
     modulePackageName: String,
-    private val options: AnimationOptions = AnimationOptions.Default,
 ) {
 
     /**
@@ -47,8 +47,13 @@ class EndfieldHudController(
 
     private val window = HudWindow(context)
     private val view = EndfieldHudView(context, moduleAssets)
-    private val timeline = HudTimeline(options)
     private val main = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var settings: HudSettings = HudSettings.Default
+
+    @Volatile
+    private var timeline: HudTimeline = HudTimeline(HudSettings.Default.animationOptions())
 
     private var lastSnapshot: BatterySnapshot? = null
     private var watcher: BatteryWatcher? = null
@@ -56,6 +61,7 @@ class EndfieldHudController(
 
     fun start() {
         if (watcher != null) return
+        ContentSettings.observe(::applySettings)
         watcher = BatteryWatcher(context, ::onBatteryChanged).also { it.start() }
         HudLog.i(SCOPE, "controller started (duration=${timeline.durationMillis}ms)")
     }
@@ -65,6 +71,18 @@ class EndfieldHudController(
         watcher = null
         cancelAnimation()
         window.detach()
+    }
+
+    /** Remote preference callbacks may arrive on a binder thread, so hop to the main thread. */
+    private fun applySettings(value: HudSettings) {
+        main.post {
+            settings = value
+            timeline = HudTimeline(value.animationOptions())
+            view.widthRatio = value.widthRatio
+            view.language = value.language
+            if (!value.enabled && window.isAttached) hide()
+            HudLog.i(SCOPE, "settings applied: $value")
+        }
     }
 
     private fun onBatteryChanged(snapshot: BatterySnapshot) {
@@ -97,10 +115,13 @@ class EndfieldHudController(
     }
 
     private fun play(mode: HudPlayMode, snapshot: BatterySnapshot) {
-        if (mode == HudPlayMode.CHARGE) wakeScreenIfNeeded()
+        val active = settings
+        if (!active.enabled) return
+        if (mode == HudPlayMode.UNPLUG && !active.playOnUnplug) return
+        if (mode == HudPlayMode.CHARGE && active.wakeOnPlug) wakeScreenIfNeeded()
 
         view.setSnapshot(snapshot)
-        if (!window.attach(view, HudMetrics.topMarginPx(context))) {
+        if (!window.attach(view, HudMetrics.topMarginPx(context, active.topGapDp))) {
             HudLog.w(SCOPE, "window attach failed; skipping playback")
             return
         }
@@ -109,16 +130,17 @@ class EndfieldHudController(
 
     private fun startAnimation(mode: HudPlayMode) {
         cancelAnimation()
+        val run = timeline
 
-        val running = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = timeline.durationMillis
+        val started = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = run.durationMillis
             interpolator = LinearInterpolator()
             addUpdateListener { animation ->
                 val cue = (animation.animatedValue as Float).toDouble()
                 view.render(
                     when (mode) {
-                        HudPlayMode.CHARGE -> timeline.evaluateCharge(cue)
-                        HudPlayMode.UNPLUG -> timeline.evaluateUnplug(cue)
+                        HudPlayMode.CHARGE -> run.evaluateCharge(cue)
+                        HudPlayMode.UNPLUG -> run.evaluateUnplug(cue)
                     },
                 )
             }
@@ -130,8 +152,8 @@ class EndfieldHudController(
                 }
             })
         }
-        animator = running
-        running.start()
+        animator = started
+        started.start()
     }
 
     private fun cancelAnimation() {
