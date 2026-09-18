@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.ningmenglemon.endfieldcharge"
+    namespace = "com.lemoneko.endfieldcharge"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.ningmenglemon.endfieldcharge"
+        applicationId = "com.lemoneko.endfieldcharge"
         minSdk = 35
         targetSdk = 35
         versionCode = 1
