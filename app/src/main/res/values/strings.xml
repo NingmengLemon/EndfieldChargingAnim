@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Endfield Charge</string>
+    <string name="xposed_description">Replaces the ROM charging animation with the Endfield-style super-charge HUD.</string>
+</resources>

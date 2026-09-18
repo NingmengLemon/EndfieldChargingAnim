@@ -1,0 +1,6 @@
+# Keep the shell wrapper LF so it still runs outside Windows.
+gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.png binary
+*.webp binary
