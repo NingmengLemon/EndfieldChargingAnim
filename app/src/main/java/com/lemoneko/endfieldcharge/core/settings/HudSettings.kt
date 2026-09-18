@@ -6,7 +6,8 @@ import com.lemoneko.endfieldcharge.core.timeline.AnimationOptions
  * Everything the user can tune.
  *
  * Deliberately free of Android imports so the defaults and the clamping can be unit tested.
- * Persistence lives in [HudSettingsCodec].
+ * Persistence and delivery to the hooked process live in [HudSettingsJson] and the module app's
+ * SettingsProvider.
  */
 data class HudSettings(
     /** Master switch. When off, the ROM keeps its own animation and nothing is drawn. */
