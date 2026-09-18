@@ -1,10 +1,16 @@
 package com.ningmenglemon.endfieldcharge.core
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.animation.LinearInterpolator
+import com.ningmenglemon.endfieldcharge.core.timeline.AnimationOptions
+import com.ningmenglemon.endfieldcharge.core.timeline.HudTimeline
 import com.ningmenglemon.endfieldcharge.ui.EndfieldHudView
 
 /** Which of the two `zmd-charge` timelines to play. */
@@ -17,32 +23,47 @@ enum class HudPlayMode {
 }
 
 /**
- * ROM agnostic HUD driver: watches the battery, decides when to play, owns the window.
+ * ROM agnostic HUD driver: watches the battery, decides when to play, owns the window and runs
+ * the frame loop.
  *
  * Everything ROM specific lives behind [com.ningmenglemon.endfieldcharge.rom.RomAdapter]; this
  * class only knows about batteries and pixels.
  */
-class EndfieldHudController(private val context: Context) {
+class EndfieldHudController(
+    private val context: Context,
+    modulePackageName: String,
+    private val options: AnimationOptions = AnimationOptions.Default,
+) {
+
+    /**
+     * Inside SystemUI the ambient context belongs to SystemUI, so its assets do not contain the
+     * module's bundled font. The module's own package context does.
+     */
+    private val moduleAssets = runCatching {
+        context.createPackageContext(modulePackageName, 0).assets
+    }.onFailure {
+        HudLog.w(SCOPE, "cannot open $modulePackageName assets; falling back to system fonts", it)
+    }.getOrDefault(context.assets)
 
     private val window = HudWindow(context)
-    private val view = EndfieldHudView(context)
+    private val view = EndfieldHudView(context, moduleAssets)
+    private val timeline = HudTimeline(options)
     private val main = Handler(Looper.getMainLooper())
 
     private var lastSnapshot: BatterySnapshot? = null
     private var watcher: BatteryWatcher? = null
-
-    private val hideRunnable = Runnable { hide() }
+    private var animator: ValueAnimator? = null
 
     fun start() {
         if (watcher != null) return
         watcher = BatteryWatcher(context, ::onBatteryChanged).also { it.start() }
-        HudLog.i(SCOPE, "controller started")
+        HudLog.i(SCOPE, "controller started (duration=${timeline.durationMillis}ms)")
     }
 
     fun stop() {
         watcher?.stop()
         watcher = null
-        main.removeCallbacks(hideRunnable)
+        cancelAnimation()
         window.detach()
     }
 
@@ -78,8 +99,6 @@ class EndfieldHudController(private val context: Context) {
     private fun play(mode: HudPlayMode, snapshot: BatterySnapshot) {
         if (mode == HudPlayMode.CHARGE) wakeScreenIfNeeded()
 
-        main.removeCallbacks(hideRunnable)
-
         val density = context.resources.displayMetrics.density
         val topMarginPx = (TOP_MARGIN_DP * density).toInt()
 
@@ -88,14 +107,44 @@ class EndfieldHudController(private val context: Context) {
             HudLog.w(SCOPE, "window attach failed; skipping playback")
             return
         }
-        view.play(mode)
+        startAnimation(mode)
+    }
 
-        // Stage 1: a fixed hold time. Stage 2 replaces this with the real timeline completion.
-        main.postDelayed(hideRunnable, PLACEHOLDER_DURATION_MS)
+    private fun startAnimation(mode: HudPlayMode) {
+        cancelAnimation()
+
+        val running = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = timeline.durationMillis
+            interpolator = LinearInterpolator()
+            addUpdateListener { animation ->
+                val cue = (animation.animatedValue as Float).toDouble()
+                view.render(
+                    when (mode) {
+                        HudPlayMode.CHARGE -> timeline.evaluateCharge(cue)
+                        HudPlayMode.UNPLUG -> timeline.evaluateUnplug(cue)
+                    },
+                )
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Only the animator that is still current may dismiss the HUD; a cancelled
+                    // predecessor must not close the window of its replacement.
+                    if (animator === animation) hide()
+                }
+            })
+        }
+        animator = running
+        running.start()
+    }
+
+    private fun cancelAnimation() {
+        val running = animator ?: return
+        animator = null
+        running.cancel()
     }
 
     private fun hide() {
-        view.stop()
+        animator = null
         window.detach()
     }
 
@@ -122,6 +171,5 @@ class EndfieldHudController(private val context: Context) {
         const val SCOPE = "hud"
         const val WAKE_REASON = "com.ningmenglemon.endfieldcharge:PLUGGED"
         const val TOP_MARGIN_DP = 8f
-        const val PLACEHOLDER_DURATION_MS = 4000L
     }
 }

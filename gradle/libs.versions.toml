@@ -3,10 +3,12 @@ agp = "8.9.1"
 kotlin = "2.1.20"
 libxposed = "102.0.0"
 androidxAnnotation = "1.9.1"
+junit = "4.13.2"
 
 [libraries]
 libxposed-api = { module = "io.github.libxposed:api", version.ref = "libxposed" }
 androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "androidxAnnotation" }
+junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -14,5 +14,7 @@ internal object HudLog {
 
     fun w(scope: String, message: String) = Log.w(TAG, "[$scope] $message")
 
+    fun w(scope: String, message: String, tr: Throwable) = Log.w(TAG, "[$scope] $message", tr)
+
     fun e(scope: String, message: String, tr: Throwable? = null) = Log.e(TAG, "[$scope] $message", tr)
 }

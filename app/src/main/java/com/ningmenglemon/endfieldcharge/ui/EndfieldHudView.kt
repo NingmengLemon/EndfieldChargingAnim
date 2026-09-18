@@ -1,157 +1,525 @@
 package com.ningmenglemon.endfieldcharge.ui
 
 import android.content.Context
+import android.content.res.AssetManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.view.View
 import com.ningmenglemon.endfieldcharge.core.BatterySnapshot
-import com.ningmenglemon.endfieldcharge.core.HudPlayMode
+import com.ningmenglemon.endfieldcharge.core.timeline.HudState
+import com.ningmenglemon.endfieldcharge.core.timeline.RippleState
+import kotlin.math.max
 import kotlin.math.min
 
 /**
- * The HUD itself.
+ * Canvas renderer for the Endfield charge HUD.
  *
- * Stage 1 draws a static placeholder so the window plumbing (type, z-order over the keyguard,
- * cutout handling, scaling) can be verified on hardware before the animation work starts.
- * The timeline driven renderer replaces [onDraw] in stage 2.
+ * Ported from `zmd-charge`'s `Views/HudWindow.axaml` + `Views/HudWindow.axaml.cs`. The Avalonia
+ * visual tree is a fixed 560x90 canvas whose parts are moved by the timeline, so this class keeps
+ * the same design unit geometry and converts once at draw time through [unit].
+ *
+ * Structure, mirroring the original tree:
+ *
+ * ```
+ * hostScale                     (ScaleHost, whole HUD shrinks away at the end)
+ *   pill                        (rounded rect, clips the ripples, own scale + alpha)
+ *     ripples                   (three rings, offset by rippleTranslateX/Y)
+ *   bolt                        (circle form cross fades into square form)
+ *   title                       (tagline + title, centred on the pill)
+ *   numbers                     (Wh / percent / badge row)
+ * ```
  */
-class EndfieldHudView(context: Context) : View(context) {
+class EndfieldHudView(
+    context: Context,
+    /**
+     * Assets of the *module* package. Inside SystemUI the view is built with the SystemUI context,
+     * whose assets do not contain our bundled font, so the controller hands over the module's own
+     * AssetManager. Defaults to the ambient context, which is correct inside the module app.
+     */
+    assets: AssetManager = context.assets,
+) : View(context) {
 
-    /** Layout constants taken verbatim from `zmd-charge` (`Views/HudWindow.axaml`). */
-    private val scale: Float = run {
-        val metrics = resources.displayMetrics
-        val widthDp = metrics.widthPixels / metrics.density
-        min(1f, widthDp * WIDTH_RATIO / PILL_WIDTH_DP)
+    private val density = resources.displayMetrics.density
+
+    /**
+     * Design unit to pixel factor.
+     *
+     * `zmd-charge` uses 560x90 logical pixels with a 0.8 global scale, which is 448 dp wide and
+     * does not fit a 411 dp phone. The scale is therefore capped by the screen width so the pill
+     * occupies at most [WIDTH_RATIO] of it; every length, radius and font size scales together.
+     */
+    private val uiScale: Float = run {
+        val widthDp = resources.displayMetrics.widthPixels / density
+        min(GLOBAL_SCALE, widthDp * WIDTH_RATIO / PILL_WIDTH)
     }
 
-    private val pillWidthPx = PILL_WIDTH_DP * scale * resources.displayMetrics.density
-    private val pillHeightPx = PILL_HEIGHT_DP * scale * resources.displayMetrics.density
+    private val unit = uiScale * density
 
-    private val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = PILL_COLOR
-        style = Paint.Style.FILL
-    }
-
-    private val platePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = ICON_PLATE_COLOR
-        style = Paint.Style.FILL
-    }
-
-    private val boltPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = BOLT_COLOR
-        style = Paint.Style.FILL
-    }
-
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 26f * scale * resources.displayMetrics.density
-        textAlign = Paint.Align.CENTER
-        // Paint.letterSpacing is in em, so it stays scale independent.
-        letterSpacing = 2f / 26f
-        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
-    }
-
-    private val rect = RectF()
-    private val boltPath = Path()
-
+    private var state: HudState? = null
     private var snapshot: BatterySnapshot? = null
 
-    /** Feeds the battery reading that the drawn content is derived from. */
+    // ---------------- paints ----------------
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = TEXT_PRIMARY
+    }
+
+    private val medium = HudTypefaces.medium(assets)
+    private val bold = HudTypefaces.bold(assets)
+
+    // ---------------- reusable geometry ----------------
+
+    private val pillPath = Path()
+    private val rect = RectF()
+    private val boltPath = Path()
+    private val arcPath = Path()
+
     fun setSnapshot(value: BatterySnapshot?) {
         snapshot = value
         invalidate()
     }
 
-    /**
-     * Stage 1 placeholder: a plain fade in. Stage 2 drives this from the ported timeline
-     * (`HudTimeline`) and an `Animator` / `Choreographer` loop instead.
-     */
-    fun play(mode: HudPlayMode) {
-        alpha = 0f
-        animate().alpha(1f).setDuration(200L).start()
-    }
-
-    fun stop() {
-        animate().cancel()
-        alpha = 1f
+    fun render(value: HudState) {
+        state = value
+        invalidate()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        // The pill grows to 90dp in state B; reserve that so nothing is clipped mid animation.
         setMeasuredDimension(
-            pillWidthPx.toInt(),
-            (PILL_MAX_HEIGHT_DP * scale * resources.displayMetrics.density).toInt(),
+            (PILL_WIDTH * unit).toInt(),
+            (PILL_MAX_HEIGHT * unit).toInt(),
         )
     }
 
     override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val left = (w - pillWidthPx) / 2f
-        val top = (h - pillHeightPx) / 2f
+        val st = state ?: return
+        if (st.hostScale <= 0.001f) return
 
-        rect.set(left, top, left + pillWidthPx, top + pillHeightPx)
-        val radius = pillHeightPx / 2f
-        canvas.drawRoundRect(rect, radius, radius, pillPaint)
+        val cx = width / 2f
+        val cy = height / 2f
 
-        // Placeholder content: white circle + bolt on the left, title centred.
-        val density = resources.displayMetrics.density
-        val circleRadius = 16f * scale * density
-        val circleCx = left + 32f * scale * density + circleRadius
-        val circleCy = h / 2f
-        canvas.drawCircle(circleCx, circleCy, circleRadius, platePaint)
+        canvas.save()
+        canvas.scale(st.hostScale, st.hostScale, cx, cy)
 
-        buildBoltPath(circleCx, circleCy, 18f * scale * density)
-        canvas.drawPath(boltPath, boltPaint)
+        drawPill(canvas, st, cx, cy)
+        drawRipples(canvas, st, cx, cy)
+        drawBolt(canvas, st, cx, cy)
+        drawTitle(canvas, st, cx, cy)
+        drawNumbers(canvas, st, cx, cy)
 
-        canvas.drawText("超充模式", w / 2f, h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f, textPaint)
+        canvas.restore()
+    }
+
+    // ---------------- pill + ripples ----------------
+
+    private fun drawPill(canvas: Canvas, st: HudState, cx: Float, cy: Float) {
+        if (st.pillAlpha <= 0.001f) return
+
+        val halfW = PILL_WIDTH * unit / 2f
+        val halfH = st.pillHeight * unit / 2f
+        val radius = st.pillCorner * unit
+
+        canvas.save()
+        canvas.scale(st.pillScale, st.pillScale, cx, cy)
+
+        rect.set(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+        pillPath.reset()
+        pillPath.addRoundRect(rect, radius, radius, Path.Direction.CW)
+
+        fillPaint.color = PILL_COLOR
+        fillPaint.alpha = alpha(st.pillAlpha)
+        canvas.drawPath(pillPath, fillPaint)
+        canvas.restore()
     }
 
     /**
-     * Reproduces `PathIcon`'s `Stretch=Uniform` behaviour for the bolt geometry on its 24x24 grid:
-     * the path's own bounds are scaled uniformly into the target box and centred, not stretched.
+     * The ripples live inside the pill and are clipped by its rounded rectangle, exactly like
+     * `Pill.ClipToBounds` in the original.
+     */
+    private fun drawRipples(canvas: Canvas, st: HudState, cx: Float, cy: Float) {
+        if (st.pillAlpha <= 0.001f) return
+
+        val halfW = PILL_WIDTH * unit / 2f
+        val halfH = st.pillHeight * unit / 2f
+        val radius = st.pillCorner * unit
+
+        canvas.save()
+        canvas.scale(st.pillScale, st.pillScale, cx, cy)
+        rect.set(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+        pillPath.reset()
+        pillPath.addRoundRect(rect, radius, radius, Path.Direction.CW)
+        canvas.clipPath(pillPath)
+
+        val rippleCx = cx + st.rippleTranslateX * unit
+        val rippleCy = cy + st.rippleTranslateY * unit
+
+        drawRipple(canvas, st.ripples[0], rippleCx, rippleCy, RIPPLE_INNER_D, 0f, st.pillAlpha)
+        drawRipple(canvas, st.ripples[1], rippleCx, rippleCy, RIPPLE_MID_D, 5.0f, st.pillAlpha)
+        drawRipple(canvas, st.ripples[2], rippleCx, rippleCy, RIPPLE_OUTER_D, 3.5f, st.pillAlpha)
+
+        canvas.restore()
+    }
+
+    private fun drawRipple(
+        canvas: Canvas,
+        ripple: RippleState,
+        cx: Float,
+        cy: Float,
+        diameter: Float,
+        strokeWidth: Float,
+        pillAlpha: Float,
+    ) {
+        val alphaValue = ripple.alpha * pillAlpha
+        if (alphaValue <= 0.001f || ripple.scale <= 0.001f) return
+
+        val radius = diameter * unit / 2f * ripple.scale
+        if (strokeWidth <= 0f) {
+            fillPaint.color = RIPPLE_COLOR
+            fillPaint.alpha = alpha(alphaValue)
+            canvas.drawCircle(cx, cy, radius, fillPaint)
+        } else {
+            strokePaint.color = RIPPLE_COLOR
+            strokePaint.alpha = alpha(alphaValue)
+            strokePaint.strokeWidth = strokeWidth * unit
+            canvas.drawCircle(cx, cy, radius, strokePaint)
+        }
+    }
+
+    // ---------------- bolt ----------------
+
+    private fun drawBolt(canvas: Canvas, st: HudState, cx: Float, cy: Float) {
+        if (st.boltAlpha <= 0.001f) return
+
+        val boltCx = cx + st.boltTranslateX * unit
+
+        canvas.save()
+        canvas.scale(st.boltScale, st.boltScale, boltCx, cy)
+
+        if (st.circleAlpha > 0.001f) {
+            fillPaint.color = ICON_PLATE_COLOR
+            fillPaint.alpha = alpha(st.circleAlpha * st.boltAlpha)
+            canvas.drawCircle(boltCx, cy, BOLT_CIRCLE * unit / 2f, fillPaint)
+
+            buildBoltPath(boltCx, cy, BOLT_CIRCLE_ICON * unit)
+            fillPaint.color = BOLT_DARK_COLOR
+            fillPaint.alpha = alpha(st.circleAlpha * st.boltAlpha)
+            canvas.drawPath(boltPath, fillPaint)
+        }
+
+        if (st.squareAlpha > 0.001f) {
+            val half = BOLT_SQUARE * unit / 2f
+            rect.set(boltCx - half, cy - half, boltCx + half, cy + half)
+            fillPaint.color = ICON_PLATE_COLOR
+            fillPaint.alpha = alpha(st.squareAlpha * st.boltAlpha)
+            canvas.drawRoundRect(rect, BOLT_SQUARE_RADIUS * unit, BOLT_SQUARE_RADIUS * unit, fillPaint)
+
+            buildBoltPath(boltCx, cy, BOLT_SQUARE_ICON * unit)
+            fillPaint.color = BOLT_DARK_COLOR
+            fillPaint.alpha = alpha(st.squareAlpha * st.boltAlpha)
+            canvas.drawPath(boltPath, fillPaint)
+        }
+
+        canvas.restore()
+    }
+
+    /**
+     * Reproduces `PathIcon`'s default `Stretch=Uniform`: the bolt geometry's own bounds (16x20 on
+     * its 24x24 grid) are scaled uniformly into [box] and centred, not stretched to fill it.
      */
     private fun buildBoltPath(cx: Float, cy: Float, box: Float) {
-        val pathW = BOLT_BOUNDS_W
-        val pathH = BOLT_BOUNDS_H
-        val factor = box / maxOf(pathW, pathH)
-        val drawnW = pathW * factor
-        val drawnH = pathH * factor
-        val originX = cx - drawnW / 2f - BOLT_MIN_X * factor
-        val originY = cy - drawnH / 2f - BOLT_MIN_Y * factor
+        val factor = box / max(BOLT_BOUNDS_W, BOLT_BOUNDS_H)
+        val originX = cx - BOLT_BOUNDS_W * factor / 2f - BOLT_MIN_X * factor
+        val originY = cy - BOLT_BOUNDS_H * factor / 2f - BOLT_MIN_Y * factor
+
+        fun x(v: Float) = originX + v * factor
+        fun y(v: Float) = originY + v * factor
 
         boltPath.reset()
-        boltPath.moveTo(originX + 13f * factor, originY + 2f * factor)
-        boltPath.lineTo(originX + 4f * factor, originY + 13f * factor)
-        boltPath.lineTo(originX + 12f * factor, originY + 13f * factor)
-        boltPath.lineTo(originX + 18f * factor, originY + 2f * factor)
+        boltPath.moveTo(x(13f), y(2f))
+        boltPath.lineTo(x(4f), y(13f))
+        boltPath.lineTo(x(12f), y(13f))
+        boltPath.lineTo(x(18f), y(2f))
         boltPath.close()
-        boltPath.moveTo(originX + 13f * factor, originY + 11f * factor)
-        boltPath.lineTo(originX + 20f * factor, originY + 11f * factor)
-        boltPath.lineTo(originX + 13f * factor, originY + 22f * factor)
-        boltPath.lineTo(originX + 4f * factor, originY + 22f * factor)
+        boltPath.moveTo(x(13f), y(11f))
+        boltPath.lineTo(x(20f), y(11f))
+        boltPath.lineTo(x(13f), y(22f))
+        boltPath.lineTo(x(4f), y(22f))
         boltPath.close()
     }
 
+    // ---------------- title ----------------
+
+    private fun drawTitle(canvas: Canvas, st: HudState, cx: Float, cy: Float) {
+        if (st.titleAlpha <= 0.001f) return
+
+        textPaint.typeface = medium
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.letterSpacing = TAGLINE_LETTER_SPACING / TAGLINE_SIZE
+
+        val taglineSize = TAGLINE_SIZE * unit
+        val titleSize = TITLE_SIZE * unit
+
+        // StackPanel with Spacing=2, vertically centred on the pill.
+        val taglineMetrics = metrics(medium, taglineSize)
+        val titleMetrics = metrics(bold, titleSize)
+        val totalHeight = taglineMetrics.height + TITLE_SPACING * unit + titleMetrics.height
+        var top = cy - totalHeight / 2f
+
+        textPaint.textSize = taglineSize
+        textPaint.typeface = medium
+        textPaint.color = TEXT_PRIMARY
+        textPaint.alpha = alpha(st.titleAlpha * TEXT_TERTIARY_ALPHA)
+        canvas.drawText(HudStrings.tagline, cx, top - taglineMetrics.ascent, textPaint)
+        top += taglineMetrics.height + TITLE_SPACING * unit
+
+        textPaint.textSize = titleSize
+        textPaint.typeface = bold
+        textPaint.letterSpacing = TITLE_LETTER_SPACING / TITLE_SIZE
+        textPaint.alpha = alpha(st.titleAlpha)
+        canvas.drawText(HudStrings.title, cx, top - titleMetrics.ascent, textPaint)
+
+        textPaint.letterSpacing = 0f
+    }
+
+    // ---------------- numbers + badge ----------------
+
+    private fun drawNumbers(canvas: Canvas, st: HudState, cx: Float, cy: Float) {
+        if (st.numAlpha <= 0.001f) return
+
+        val left = cx - PILL_WIDTH * unit / 2f
+        val pct = snapshot?.level ?: 0
+
+        // Left side: bolt slot is drawn by drawBolt, so start after column 0 + 1 + 2.
+        var x = left + (COL_PAD_LEFT + COL_BOLT_SLOT + COL_GAP) * unit
+
+        val whValue = snapshot?.remainingMwh?.let { formatMwh(it) } ?: "--"
+        val whMax = snapshot?.fullMwh?.let { "/" + formatMwh(it) } ?: ""
+
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.typeface = medium
+        textPaint.letterSpacing = 0f
+
+        val whSize = WH_VALUE_SIZE * unit
+        val whMaxSize = WH_MAX_SIZE * unit
+        val whValueWidth = measure(whValue, medium, whSize)
+
+        textPaint.textSize = whSize
+        textPaint.alpha = alpha(st.numAlpha)
+        canvas.drawText(whValue, x, centeredBaseline(medium, whSize, cy), textPaint)
+
+        if (whMax.isNotEmpty()) {
+            x += whValueWidth + WH_SPACING * unit
+            textPaint.textSize = whMaxSize
+            textPaint.alpha = alpha(st.numAlpha * TEXT_SECONDARY_ALPHA)
+            canvas.drawText(whMax, x, centeredBaseline(medium, whMaxSize, cy), textPaint)
+        }
+
+        // Right side: laid out from the right edge so the badge stays pinned.
+        val right = cx + PILL_WIDTH * unit / 2f
+        var cursor = right - COL_PAD_RIGHT * unit
+
+        val badgeCx = cursor - BADGE_DIAMETER * unit / 2f
+        cursor -= BADGE_DIAMETER * unit
+        cursor -= COL_GAP * unit
+
+        val pctText = pct.toString()
+        val pctSize = PCT_VALUE_SIZE * unit
+        val signSize = PCT_SIGN_SIZE * unit
+        val pctWidth = measure(pctText, medium, pctSize)
+        val signWidth = measure("%", medium, signSize)
+        val pctLeft = cursor - (pctWidth + PCT_SPACING * unit + signWidth)
+
+        textPaint.textSize = pctSize
+        textPaint.alpha = alpha(st.numAlpha)
+        canvas.drawText(pctText, pctLeft, centeredBaseline(medium, pctSize, cy), textPaint)
+
+        textPaint.textSize = signSize
+        textPaint.alpha = alpha(st.numAlpha * TEXT_SECONDARY_ALPHA)
+        canvas.drawText("%", pctLeft + pctWidth + PCT_SPACING * unit, centeredBaseline(medium, signSize, cy), textPaint)
+
+        drawBadge(canvas, st, badgeCx, cy, pct)
+    }
+
+    private fun drawBadge(canvas: Canvas, st: HudState, cx: Float, cy: Float, percent: Int) {
+        val accent = if (percent < LOW_BATTERY_THRESHOLD) BADGE_LOW_COLOR else ACCENT_COLOR
+        val radius = BADGE_DIAMETER * unit / 2f
+
+        fillPaint.color = BADGE_DARK_COLOR
+        fillPaint.alpha = alpha(st.numAlpha)
+        canvas.drawCircle(cx, cy, radius, fillPaint)
+
+        // Progress arc: 12 o'clock, clockwise, length = charge level.
+        var sweep = 360f * (percent.coerceIn(0, 100) / 100f)
+        sweep = sweep.coerceIn(0.5f, 359.5f)
+        val arcRadius = (BADGE_DIAMETER - BADGE_ARC_STROKE) * unit / 2f
+        arcPath.reset()
+        arcPath.addArc(
+            cx - arcRadius,
+            cy - arcRadius,
+            cx + arcRadius,
+            cy + arcRadius,
+            -90f,
+            sweep,
+        )
+        strokePaint.color = accent
+        strokePaint.alpha = alpha(st.numAlpha)
+        strokePaint.strokeWidth = BADGE_ARC_STROKE * unit
+        strokePaint.strokeCap = Paint.Cap.ROUND
+        canvas.drawPath(arcPath, strokePaint)
+        strokePaint.strokeCap = Paint.Cap.BUTT
+
+        // Laptop glyph: a 24x17 box centred in the badge.
+        val laptopW = LAPTOP_WIDTH * unit
+        val laptopH = LAPTOP_HEIGHT * unit
+        val laptopLeft = cx - laptopW / 2f
+        val laptopTop = cy - laptopH / 2f
+
+        val screenW = LAPTOP_SCREEN_WIDTH * unit
+        val screenH = LAPTOP_SCREEN_HEIGHT * unit
+        rect.set(
+            cx - screenW / 2f,
+            laptopTop,
+            cx + screenW / 2f,
+            laptopTop + screenH,
+        )
+        strokePaint.color = accent
+        strokePaint.alpha = alpha(st.numAlpha)
+        strokePaint.strokeWidth = LAPTOP_SCREEN_STROKE * unit
+        canvas.drawRoundRect(rect, LAPTOP_SCREEN_RADIUS * unit, LAPTOP_SCREEN_RADIUS * unit, strokePaint)
+
+        val baseH = LAPTOP_BASE_HEIGHT * unit
+        rect.set(laptopLeft, laptopTop + laptopH - baseH, laptopLeft + laptopW, laptopTop + laptopH)
+        fillPaint.color = accent
+        fillPaint.alpha = alpha(st.numAlpha)
+        canvas.drawRoundRect(rect, baseH / 2f, baseH / 2f, fillPaint)
+
+        // Electrode: Margin="0,-14,0,0" on a centred 9x3 block.
+        val electrodeW = ELECTRODE_WIDTH * unit
+        val electrodeH = ELECTRODE_HEIGHT * unit
+        val electrodeCy = cy - ELECTRODE_MARGIN_TOP * unit
+        rect.set(
+            cx - electrodeW / 2f,
+            electrodeCy - electrodeH / 2f,
+            cx + electrodeW / 2f,
+            electrodeCy + electrodeH / 2f,
+        )
+        fillPaint.color = accent
+        fillPaint.alpha = alpha(st.numAlpha)
+        canvas.drawRoundRect(
+            rect,
+            ELECTRODE_RADIUS * unit,
+            ELECTRODE_RADIUS * unit,
+            fillPaint,
+        )
+    }
+
+    // ---------------- text helpers ----------------
+
+    private class Metrics(val ascent: Float, val descent: Float) {
+        val height: Float get() = descent - ascent
+
+        /** Offset to add to a desired visual centre to get the drawText baseline. */
+        val baselineOffset: Float get() = -(ascent + descent) / 2f
+    }
+
+    private fun metrics(typeface: Typeface, size: Float): Metrics {
+        textPaint.typeface = typeface
+        textPaint.textSize = size
+        val fm = textPaint.fontMetrics
+        return Metrics(fm.ascent, fm.descent)
+    }
+
+    /** Baseline that vertically centres a single line of text on [centerY]. */
+    private fun centeredBaseline(typeface: Typeface, size: Float, centerY: Float): Float =
+        centerY + metrics(typeface, size).baselineOffset
+
+    private fun measure(text: String, typeface: Typeface, size: Float): Float {
+        textPaint.typeface = typeface
+        textPaint.textSize = size
+        textPaint.letterSpacing = 0f
+        return textPaint.measureText(text)
+    }
+
+    private fun alpha(value: Float) = (value.coerceIn(0f, 1f) * 255f).toInt()
+
+    private fun formatMwh(value: Float) = value.toInt().toString()
+
     private companion object {
-        const val PILL_WIDTH_DP = 560f
-        const val PILL_HEIGHT_DP = 60f
-        const val PILL_MAX_HEIGHT_DP = 90f
+        const val PILL_WIDTH = 560f
+        const val PILL_MAX_HEIGHT = 90f
 
-        /** Fraction of the screen width the pill is allowed to occupy. */
+        /** Fraction of the screen width the pill may occupy. */
         const val WIDTH_RATIO = 0.92f
+        const val GLOBAL_SCALE = 0.8f
 
-        const val PILL_COLOR = 0xFF312F30.toInt()
-        const val ICON_PLATE_COLOR = 0xFFE9E7E4.toInt()
-        const val BOLT_COLOR = 0xFF141313.toInt()
+        const val BOLT_CIRCLE = 32f
+        const val BOLT_CIRCLE_ICON = 18f
+        const val BOLT_SQUARE = 18f
+        const val BOLT_SQUARE_RADIUS = 4.5f
+        const val BOLT_SQUARE_ICON = 12f
 
-        /** Bounds of `M13 2 L4 13 L12 13 L18 2 Z M13 11 L20 11 L13 22 L4 22 Z` on its 24x24 grid. */
         const val BOLT_MIN_X = 4f
         const val BOLT_MIN_Y = 2f
         const val BOLT_BOUNDS_W = 16f
         const val BOLT_BOUNDS_H = 20f
+
+        const val RIPPLE_INNER_D = 160f
+        const val RIPPLE_MID_D = 220f
+        const val RIPPLE_OUTER_D = 280f
+
+        const val TAGLINE_SIZE = 9f
+        const val TITLE_SIZE = 26f
+        const val TAGLINE_LETTER_SPACING = 2f
+        const val TITLE_LETTER_SPACING = 2f
+        const val TITLE_SPACING = 2f
+
+        // NumHost columns: 32 | 18 | 14 | auto | * | auto | 14 | auto | 5
+        const val COL_PAD_LEFT = 32f
+        const val COL_BOLT_SLOT = 18f
+        const val COL_GAP = 14f
+        const val COL_PAD_RIGHT = 5f
+
+        const val WH_VALUE_SIZE = 26f
+        const val WH_MAX_SIZE = 14f
+        const val WH_SPACING = 2f
+        const val PCT_VALUE_SIZE = 22f
+        const val PCT_SIGN_SIZE = 13f
+        const val PCT_SPACING = 1f
+
+        const val BADGE_DIAMETER = 46f
+        const val BADGE_ARC_STROKE = 4.5f
+        const val LAPTOP_WIDTH = 24f
+        const val LAPTOP_HEIGHT = 17f
+        const val LAPTOP_SCREEN_WIDTH = 17f
+        const val LAPTOP_SCREEN_HEIGHT = 11.5f
+        const val LAPTOP_SCREEN_RADIUS = 1.5f
+        const val LAPTOP_SCREEN_STROKE = 2f
+        const val LAPTOP_BASE_HEIGHT = 3f
+        const val ELECTRODE_WIDTH = 9f
+        const val ELECTRODE_HEIGHT = 3f
+        const val ELECTRODE_RADIUS = 1f
+        const val ELECTRODE_MARGIN_TOP = 14f
+
+        const val TEXT_SECONDARY_ALPHA = 0.55f
+        const val TEXT_TERTIARY_ALPHA = 0.40f
+
+        const val LOW_BATTERY_THRESHOLD = 20
+
+        val PILL_COLOR = Color.parseColor("#312F30")
+        val ICON_PLATE_COLOR = Color.parseColor("#E9E7E4")
+        val BOLT_DARK_COLOR = Color.parseColor("#141313")
+        val TEXT_PRIMARY = Color.WHITE
+        val RIPPLE_COLOR = Color.parseColor("#656363")
+        val ACCENT_COLOR = Color.parseColor("#C6CA4C")
+        val BADGE_LOW_COLOR = Color.parseColor("#FF4D4F")
+        val BADGE_DARK_COLOR = Color.parseColor("#262425")
     }
 }

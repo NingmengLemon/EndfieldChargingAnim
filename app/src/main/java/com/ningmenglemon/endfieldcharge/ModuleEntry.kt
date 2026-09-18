@@ -53,7 +53,7 @@ class ModuleEntry : XposedModule() {
         }.onSuccess {
             log(Log.INFO, TAG, "adapter installed: ${adapter.name}")
             SystemUiContext.onAvailable { context ->
-                runCatching { EndfieldHudController(context).start() }
+                runCatching { EndfieldHudController(context, MODULE_PACKAGE).start() }
                     .onFailure { log(Log.ERROR, TAG, "failed to start HUD controller", it) }
             }
         }.onFailure {
@@ -64,5 +64,6 @@ class ModuleEntry : XposedModule() {
     companion object {
         const val TAG = "EndfieldCharge"
         const val TARGET_PACKAGE = "com.android.systemui"
+        const val MODULE_PACKAGE = "com.ningmenglemon.endfieldcharge"
     }
 }

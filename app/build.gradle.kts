@@ -51,4 +51,6 @@ dependencies {
     // Provided by the Xposed framework at runtime; must never be bundled into the APK.
     compileOnly(libs.libxposed.api)
     compileOnly(libs.androidx.annotation)
+
+    testImplementation(libs.junit)
 }
