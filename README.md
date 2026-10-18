@@ -30,5 +30,6 @@ app/src/main/java/com/lemoneko/endfieldcharge/
 
 ## Licence
 
-The module is licensed under AGPL-3.0.
+The module is licensed under the MIT License. The HUD timeline and renderer are ported from
+[zmd-charge](https://github.com/QinAnze/zmd-charge), also released under the MIT License.
 Inter font is bundled under the SIL Open Font License (`app/src/main/assets/fonts/Inter-OFL.txt`).
